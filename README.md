@@ -5,4 +5,6 @@ The features implemented in this version are:
 * Leader election
 * Log replication
 * Snapshot and log compaction
-* Persistent for recovery from crash
+* Persistent state for crash recovery
+
+For notes on the general functioning of Raft please consult either the link provided above or Raft.md
