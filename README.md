@@ -8,3 +8,5 @@ The features implemented in this version are:
 * Persistent state for crash recovery
 
 For notes on the general functioning of Raft please consult either the link provided above or Raft.md
+
+
