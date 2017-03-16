@@ -10,7 +10,9 @@ The features implemented in this version are:
 For notes on the general functioning of Raft please consult either the link provided above or Raft.md
 
 This sample also contains the tests used to evaluate our raft environment, found in src/raft/test_test.go. To run from command line, assuming you have golang installed:
+
 $ cd src/raft
+
 $ go test
 
 
