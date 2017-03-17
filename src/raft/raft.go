@@ -59,29 +59,34 @@ type Raft struct {
      me        int  // index into peers[]
 
      state        string  //"Leader"/"Follower"/"Candidate"
-     CurrentTerm  int
+     CurrentTerm  int   //Last term Server has seen
      VotedFor     int   // Id of candidate that received most recent vote,otherwise -1
 
      log         []Log // log[0] stores the term and index of last  discarded log
      commitIndex int   // highest committed log entry
      startIndex  int   // discarded logs index
+                       // logs = [ 0, startIndex + 1, startIndex + 2, ... ]
+			  // invariant: commitIndex >= startIndex
 
-     killCh      chan struct{}  // killed
-     DemoteCh    chan struct{}  // down to follower if set
-     heartBeatCh chan HeartBeat // heartbeats
+     killCh      chan struct{}  // if the peer has been killed
+     DemoteCh    chan struct{}  // demotes server to follower state if set
+     heartBeatCh chan HeartBeat // If set indicates it is a heartbeat rather than full Raft object
      applyCh     chan ApplyMsg  // log is applied
 
-
-     nextIndex  []int
-     matchIndex []int
+     //Only used by machines in leader state to look at other machines, meaning nextIndex[leader] and matchIndex[leader] are undefined 
+     nextIndex  []int //for each server, the index of the next log needed by that server
+     matchIndex []int //for each server, the index of the highest log entry confirmed as being replicated on that server
 }
+
+//Heartbeat object, sent out periodically by leader to maintain authority/correctness with other servers
 
 type HeartBeat struct {
-     leaderId     int
-     term         int
-     leaderCommit int
+     leaderId     int //ID # of server that is leader
+     term         int //what term it is
+     leaderCommit int //Highest log entry committed by leader
 }
 
+//Return the server's current term and whether it thinks that it is the leader
 func (rf *Raft) GetState() (int, bool) {
      rf.mu.Lock()
      defer rf.mu.Unlock()
@@ -122,6 +127,7 @@ func (rf *Raft) readPersist(data []byte) {
      rf.commitIndex = rf.startIndex
 }
 
+//Object consisting of the args for RequestVote RPCs
 
 type RequestVoteArgs struct {
      Term        int  // candidate's vote
@@ -130,6 +136,7 @@ type RequestVoteArgs struct {
      LastLogTerm  int // term of candidate's last log entry
 }
 
+//Object containing the structure of replies from RequestVote RPCs
 
 type RequestVoteReply struct {
      FollowerId    int
@@ -137,25 +144,27 @@ type RequestVoteReply struct {
      VoteGranted bool // true means candidate receives vote
 }
 
+//Object containing args for AppendEntries RPCs
 
 type AppendEntriesArgs struct {
-     IsHeartBeat bool //only true if its a heartbeat, LeaderId and Term only exist if true
+     IsHeartBeat bool //only true if its a heartbeat, the object only consists of leaderID and term in this case
 
-     LeaderId    int
-     Term        int
+     LeaderId    int //Leader's ID
+     Term        int //Leader's term
 
-     PrevLogIndex int   // preceding log entry's index
-     PrevLogTerm  int   //
+     PrevLogIndex int   // index of most recent log entry
+     PrevLogTerm  int   //term of PrevLogIndex
      LeaderCommit int   // commit index of leader
-     Entries      []Log //
+     Entries      []Log //log entries to be stored
 }
 
+//Object containing the structure of replies from AppendEntries RPCs
 
 type AppendEntriesReply struct {
      FollowerId  int
-     Term        int
-     Success     bool
-     NextIndex   int
+     Term        int  //CurrentTerm, used by leader to update itself
+     Success     bool //used when checking if logs are consistent 
+     NextIndex   int  //possibly used as PrevLogIndex in future AppendEntries RPCs
 }
 
 
