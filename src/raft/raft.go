@@ -167,22 +167,24 @@ type AppendEntriesReply struct {
      NextIndex   int  //possibly used as PrevLogIndex in future AppendEntries RPCs
 }
 
+//Object containing args for InstallSnapshot RPCs
 
 type InstallSnapshotArgs struct {
      LeaderId int
-     Term     int
+     Term     int //Term of leader
 
-     LastIncludedIndex int
-     LastIncludedTerm  int
-     Snapshot          []byte
+     LastIncludedIndex int //Snapshots replace all entries up to and including this index
+     LastIncludedTerm  int //Term of LastIncludedIndex
+     Snapshot          []byte //Snapshot data
 }
 
+//Object containing the structure of replies from InstallSnapshot RPCs
 
 type InstallSnapshotReply struct {
-     Success    bool
+     Success    bool //tool for checking if the RPC was successful in installing the snapshot
 
      FollowerId int
-     Term       int
+     Term       int //CurrentTerm, from which leader can update itself to make sure its concurrent 
 }
 
 
@@ -202,11 +204,13 @@ func (rf* Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *App
                      args, reply)
 }
 
+//InstallSnapshot RPC sender
 
 func (rf* Raft) sendInstallSnapshot(server int, args InstallSnapshotArgs,reply *InstallSnapshotReply) bool {
       return rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
 }
 
+//If server is not on given currentTerm, resets it to not having voted for a leader and updates it to the currentTerm
 
 func (rf *Raft) setCurrentTerm(currentTerm int) {
      if currentTerm != rf.CurrentTerm {
@@ -214,6 +218,8 @@ func (rf *Raft) setCurrentTerm(currentTerm int) {
         }
         rf.CurrentTerm = currentTerm
 }
+
+//If server is not currently a follower demotes it to follower state
 
 func (rf *Raft) Demote() {
      if rf.state != "Follower" {
@@ -225,11 +231,14 @@ func (rf *Raft) Demote() {
      }
 }
 
+//Returns the index and term of the last log
+
 func (rf *Raft) lastLogIndex() (int, int) {
      return rf.log[len(rf.log) - 1].Index, rf.log[len(rf.log) - 1].Term
 }
 
 // Check if leader is behind, if so catch back up then turn into follower
+
 func (rf *Raft) checkStaleLeader(tag string, term int, peer int) bool {
      if rf.CurrentTerm < term {
         rf.setCurrentTerm(term)
@@ -259,6 +268,8 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply){
            reply.Term = rf.CurrentTerm
            return
         }
+	
+	//Reject request if Candidate's logs are behind receiver's logs
         lastLogIndex, lastLogTerm := rf.lastLogIndex()
         if lastLogTerm > args.LastLogTerm || (lastLogTerm ==args.LastLogTerm && lastLogIndex > args.LastLogIndex) {
 
@@ -267,10 +278,12 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply){
            return
         }
 
-        
+        //Since receiver has vetted candidate, if it has yet to vote for anyone, vote for candidate
         if rf.VotedFor == -1 {
            rf.VotedFor = args.CandidateId
            reply.VoteGranted = true
+	
+	//Otherwise check to see if it has voted for candidate by comparing ID of who it voted for to candidate ID
         } else {
            reply.VoteGranted = (rf.VotedFor == args.CandidateId)
         }
@@ -292,13 +305,17 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
      reply.Term = rf.CurrentTerm
      reply.NextIndex = -1
 
-     // If leader has stale term, reject.
+     // If leader has stale term, reject request
 
      if args.Term < rf.CurrentTerm {
         reply.Success = false
         return
      }
+
+     //If this is a heartbeat, send it into heartbeat channel
      if args.IsHeartBeat {
+	//Heartbeat allows leader to concurrently check followers' logs and let them know it is still alive
+	//(lightweight and concurrent through goroutine)
         go func() {
            var heartBeat HeartBeat
            heartBeat.leaderId = args.LeaderId
@@ -306,13 +323,15 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
            heartBeat.leaderCommit = args.LeaderCommit
            rf.heartBeatCh <- heartBeat
         }()
+	     
+     //If log ends up being inconsistent, returns false but allows leader to retry
      ok, nextIndex := rf.LogIntegrity(args)
      reply.Success = ok
      reply.NextIndex = nextIndex
 
-     if !reply.Success {
-     }
      } else {
+	     
+	//Same process as with heartbeat, checks if logs are consistent and if not returns false but lets leader retry
         ok, nextIndex := rf.LogIntegrity(args)
         if !ok {
            reply.Success = false
@@ -320,7 +339,9 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
            return
         }
         if len(args.Entries) != 0 {
-            different := false // if has inconsistent logs
+	    
+	    //If there are logs, get rid of the bad ones and append new ones
+            different := false //Marker of whether there are inconsistent logs
            for i, j := 0, args.PrevLogIndex + 1; i < len(args.Entries); i++ {
                if j >= rf.startIndex + len(rf.log)  {
                   rf.log = append(rf.log, args.Entries[i])
@@ -332,11 +353,14 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
                }
                j+=1
            }
+	   //If the logs are inconsistent update them to match
            if different && rf.startIndex +  len(rf.log) > args.PrevLogIndex + len(args.Entries) + 1 {
                rf.log = rf.log[0 : args.PrevLogIndex + len(args.Entries) + 1 - rf.startIndex]
            }
        }
        reply.Success = true
+	     
+       //Update commit index to match
        newCommitIndex := args.LeaderCommit
        lastLogIndex, _ :=rf.lastLogIndex()
        if newCommitIndex >lastLogIndex {
@@ -356,8 +380,9 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
    }
 }
 
-//discard previous log entries
-//
+//discard previous log entries (those before lastlogindex)
+//Used by cleanup service to ensure Raft does not exceed space limitations 
+//by discarding committed logs after they are executed
 
 func (rf *Raft) TrashLogs(lastLogIndex int, lastLogTerm int) {
      rf.mu.Lock()
@@ -368,17 +393,20 @@ func (rf *Raft) TrashLogs(lastLogIndex int, lastLogTerm int) {
         rf.commitIndex = lastLogIndex
      }
 
+     //prepares to discard logs up to the last log
      discardFrom := lastLogIndex - rf.startIndex
 
+     //Cannot discard if lastlog is same or ahead of current log
      if discardFrom <= 0 {
         return
      } else if discardFrom >= len(rf.log) {
-
+       //Commit index is too ahead, remake log with length 1 using the most recent log info
        rf.startIndex = lastLogIndex
        rf.log = make([]Log, 1)
        rf.log[0].Index = lastLogIndex
        rf.log[0].Term = lastLogTerm
      } else {
+       //Otherwise, discard all old logs
        retainLog := rf.log[discardFrom + 1:]
        rf.log[0].Index = rf.log[discardFrom].Index
        rf.log[0].Term = rf.log[discardFrom].Term
@@ -393,7 +421,7 @@ func (rf *Raft) TrashLogs(lastLogIndex int, lastLogTerm int) {
     }
 }
 
-
+//Handles InstallSnapshot RPCs
 
 func (rf *Raft) InstallSnapshot(args InstallSnapshotArgs, reply *InstallSnapshotReply) {
      rf.mu.Lock()
@@ -405,12 +433,14 @@ func (rf *Raft) InstallSnapshot(args InstallSnapshotArgs, reply *InstallSnapshot
      reply.Term = rf.CurrentTerm
      reply.Success = false
 
-     // if leader is stale reject
+     // if leader's term is stale reject request
      if args.Term < rf.CurrentTerm {
         return
      }
 
      reply.Success = true
+	
+     //If the snapshot itself is stale reject request	
      if args.LastIncludedIndex <= rf.commitIndex {
         return
      }
@@ -423,20 +453,26 @@ func (rf *Raft) InstallSnapshot(args InstallSnapshotArgs, reply *InstallSnapshot
      rf.applyCh <- applyMsg
 }
 
-//
+//Checks for log consistency by cross-referencing the entry at PrevLogIndex with PrevLogTerm 
+//(the two should match up)
+
 func (rf *Raft) LogIntegrity(args AppendEntriesArgs) (bool, int) {
      lastLogIndex, _ := rf.lastLogIndex()
      if lastLogIndex < args.PrevLogIndex {
+	//logs are missing
         return false, lastLogIndex
      }
      if args.PrevLogIndex <= rf.commitIndex {
+	//committed log has to be consistent, as the last log recognized by AppendEntries is either the same as it
+	//or precedes
         return true, -1
      }
      if rf.log[args.PrevLogIndex - rf.startIndex].Term != args.PrevLogTerm {
+     // Skip all logs whose term == rf.log[args.PrevLogIndex].Term
+	 
         matchIndex := args.PrevLogIndex - 1
         for ; matchIndex > rf.startIndex; matchIndex-- {
-            if rf.log[args.PrevLogIndex - rf.startIndex].Term != rf.log[matchIndex - rf.startIndex].Term \
-{
+            if rf.log[args.PrevLogIndex - rf.startIndex].Term != rf.log[matchIndex - rf.startIndex].Term {
                        break
             }
         }
@@ -449,11 +485,13 @@ func (rf *Raft) LogIntegrity(args AppendEntriesArgs) (bool, int) {
 }
 
 func ElectionTimer() time.Duration {
-     //randomize election between 250ms and 300ms.
+     //randomize election timer between 250ms and 300ms.
      return time.Duration(250 + rand.Intn(50)) * time.Millisecond
 }
 
-func (rf *Raft) FLoop() {
+//Loop executed by machines in the follower state
+
+func (rf *Raft) FLoop() {	
      rf.mu.Lock()
      rf.state = "Follower"
      rf.mu.Unlock()
@@ -462,12 +500,17 @@ func (rf *Raft) FLoop() {
 
      for {
          select {
+		 
+		//if machine has been killed, end loop
                 case <-rf.killCh: {
                      return
                 }
+		 
+		//Follower has received heartbeat
                 case heartBeat := <-rf.heartBeatCh: {
                      rf.mu.Lock()
                      if heartBeat.term < rf.CurrentTerm {
+		     //The leader is a stale leader, ignore and let the next time's firing handles it
                      } else {
                        rf.setCurrentTerm(heartBeat.term)
                        rf.persist()
@@ -476,6 +519,10 @@ func (rf *Raft) FLoop() {
                      rf.mu.Unlock()
                 }
                 case <-timer.C: {
+		     //The timer has run out and the follower has not heard from the leader
+		     //we assume this means the leader is down, so the follower will convert to a candidate
+		     //and begin a new election
+			
                      go rf.CLoop()
                      return
                 }
@@ -483,18 +530,23 @@ func (rf *Raft) FLoop() {
       }
 }
 
-//
+//Loop executed by machines in the candidate state (run during elections)
+
 func (rf *Raft) CLoop() {
      rf.mu.Lock()
      rf.state = "Candidate"
      rf.mu.Unlock()
 
      for {
+	     
+	 //begins election by incrementing current term by one and voting for itself
          rf.mu.Lock()
          rf.setCurrentTerm(rf.CurrentTerm + 1)
          rf.VotedFor = rf.me
          rf.persist()
          rf.mu.Unlock()
+	     
+	 //Goes out and concurrently asks each other server to vote for it
          replies:=make(chan RequestVoteReply)
          for i:=range rf.peers {
              if i == rf.me {
@@ -519,27 +571,43 @@ func (rf *Raft) CLoop() {
                 }
              }(i)
        }
+//Starts with one vote because it voted for itself
 votes :=1
+	     
+//Next process (only starts after response from each other server)
 Other:
         for {
             select {
+		   
+		   //If this server has been killed, exit the function
                    case <-rf.killCh: {
                         return
                    }
+		    
+		   //If this server is demoted, convert to follower state
                    case <- rf.DemoteCh: {
                         go rf.FLoop()
                         return
                    }
+		    
+		   //Server has received replies to its request for votes and must check what they are
                    case reply := <-replies: {
                         rf.mu.Lock()
                         leave := false
+			   
+			//If this server is stale, catch up and then convert to follower state
                         if rf.checkStaleLeader("CandidateLoop", reply.Term,reply.FollowerId) {
                            rf.persist()
                            go rf.FLoop()
                            leave = true
+				
                         } else if reply.VoteGranted {
+			   //give server its well-earned vote
                            votes += 1
                            if (votes > len(rf.peers)/2) {
+			      
+			      //counts after every vote gained to see if it has a majority. If so,
+			      //this candidate has won the election! it now becomes the leader
                               go rf.LLoop()
                               leave = true
                            }
@@ -550,6 +618,7 @@ Other:
                         }
                    }
 
+		   //Election is over even though no one appears to have won as time has run out
                    case <- time.After(ElectionTimer()): {
                         break Other
                    }
