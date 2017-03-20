@@ -918,6 +918,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
         return -1, -1, false
         }
 
+     //we are in leader state
      logIndex, _ := rf.lastLogIndex()
      logIndex += 1
 
@@ -929,6 +930,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
      rf.log = append(rf.log, log)
      rf.persist()
 
+     //asynchronously sync logs of rest of machines
      for i := range rf.peers {
          if i != rf.me {
             go rf.LogsSync(i)
@@ -937,6 +939,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
      return logIndex, log.Term, true
 }
 
+//
+// the tester calls Kill() when a Raft instance won't be needed again.
+//
 func (rf *Raft) Kill() {
      rf.killCh <- struct{}{}
 }
