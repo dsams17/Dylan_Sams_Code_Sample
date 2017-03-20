@@ -627,7 +627,8 @@ Other:
    }
 }
 
-//
+//Called by leader to sync logs to machines in follower state
+//The actual synchronization process is run in a separate goroutine in the leader loop
 func (rf *Raft) LogsSync(server int) {
      for {
          rf.mu.Lock()
@@ -635,6 +636,7 @@ func (rf *Raft) LogsSync(server int) {
          lastLogIndex, _ := rf.lastLogIndex()
          sendSnapshot := false
 
+	 //Send a snapshot if the log meant to be replicated is discarded
          if rf.nextIndex[server] <= rf.startIndex {
             sendSnapshot = true
          }
@@ -643,6 +645,7 @@ func (rf *Raft) LogsSync(server int) {
          var argsSnapshot InstallSnapshotArgs
          var replySnapshot InstallSnapshotReply
 
+	 //check leadership at this point as nextindex will most likely be wrong if leadership was lost
          if !lostLeadership {
             if sendSnapshot {
                argsSnapshot.LeaderId = rf.me
@@ -659,6 +662,7 @@ func (rf *Raft) LogsSync(server int) {
                argsAppend.PrevLogIndex = rf.nextIndex[server] - 1
                argsAppend.PrevLogTerm = rf.log[rf.nextIndex[server] - 1 - rf.startIndex].Term
 
+	       //append each log entry from the one after prevlogindex to the very last log to entries
                for j := argsAppend.PrevLogIndex + 1; j <= lastLogIndex; j++{
                    argsAppend.Entries = append(argsAppend.Entries, rf.log[j- rf.startIndex])
                }
@@ -666,12 +670,15 @@ func (rf *Raft) LogsSync(server int) {
         }
 
          rf.mu.Unlock()
+	    
+	//Exit if leadership was lost
         if lostLeadership {
            return
         }
 
         var repliedTerm int
 
+	//Send either InstallSnapshot or AppendEntries, depepnding on what was specified, to sync the logs
         if sendSnapshot {
            rf.mu.Lock()
            rf.mu.Unlock()
@@ -695,6 +702,7 @@ func (rf *Raft) LogsSync(server int) {
            return
         }
 
+	//Update nextIndex and matchIndex for server.
         setLastIndex := func(index int) {
              if rf.nextIndex[server] < index + 1 {
                  rf.nextIndex[server] = index + 1
@@ -704,6 +712,7 @@ func (rf *Raft) LogsSync(server int) {
              }
         }
 
+	//Check for successful reply from either InstallSnapshot or Appendentries and set the last index based on which was used
         if sendSnapshot {
             if replySnapshot.Success {
                setLastIndex(argsSnapshot.LastIncludedIndex)
@@ -725,11 +734,14 @@ func (rf *Raft) LogsSync(server int) {
     }
 }
 
-//
+//Loop executed by machines in the leader state
+
 func (rf *Raft) LLoop() {
      rf.mu.Lock()
 
      rf.state = "Leader"
+	
+     //reinitialize nextindex and matchindex in case there are now more or less active servers
      rf.nextIndex = make([]int, len(rf.peers))
      rf.matchIndex = make([]int, len(rf.peers))
      lastLogIndex, _ := rf.lastLogIndex()
@@ -739,6 +751,7 @@ func (rf *Raft) LLoop() {
 
      rf.mu.Unlock()
 
+     // Try AppendEntries asynchronously if followers miss some.
      for i := range rf.peers {
          if i != rf.me {
             go rf.LogsSync(i)
@@ -746,22 +759,27 @@ func (rf *Raft) LLoop() {
      }
 
      for {
+	 //first update commitIndex
          rf.mu.Lock()
          newCommitIndex := rf.commitIndex
 
+	 //check to see how many of the followers have replicated logs
          for c := rf.startIndex + len(rf.log) - 1; c >rf.commitIndex; c-- {
              if rf.log[c - rf.startIndex].Term == rf.CurrentTerm {
-
-                count := 1
+                
+		count := 1
                 for i := range rf.peers {
                     if i == rf.me {
                        continue
                     }
+			
+		    //increment count by 1 for each follower that has replicated the logs
                     if rf.matchIndex[i] >= c {
                        count += 1
                     }
                 }
-
+		
+		//Escape if more than half have replicated, we can now commit
                 if count > len(rf.peers) / 2 {
                       newCommitIndex = c
                     break
@@ -770,6 +788,7 @@ func (rf *Raft) LLoop() {
           }
 
           if newCommitIndex != rf.commitIndex {
+  	      // Log is replicated to majority, commit log on leader.
               for i := rf.commitIndex + 1; i <= newCommitIndex; i++ {
 
                   var applyMsg ApplyMsg
@@ -781,6 +800,7 @@ func (rf *Raft) LLoop() {
               }
 
               rf.commitIndex = newCommitIndex
+	      // Also let each follower commit
               for i := range rf.peers {
                   if i != rf.me {
                      go rf.LogsSync(i)
@@ -789,6 +809,7 @@ func (rf *Raft) LLoop() {
           }
             rf.mu.Unlock()
 
+	  //Send out heartbeat
           replies := make(chan AppendEntriesReply)
           for i := range rf.peers {
               if i == rf.me {
@@ -804,6 +825,7 @@ func (rf *Raft) LLoop() {
                  lostLeadership := rf.state != "Leader"
                  missingLog := rf.nextIndex[i] < rf.startIndex + len(rf.log)
 
+		 // Check leadership here as nextIndex may not be valid if lose leadership
                  if !lostLeadership {
 
                     args.IsHeartBeat = true
@@ -821,6 +843,7 @@ func (rf *Raft) LLoop() {
                     return
                  }
 
+		 // Synchronize logs if inconsistent or missing
                  if missingLog || (rf.sendAppendEntries(i, args,&reply) && !reply.Success) {
                     go rf.LogsSync(i)
                     if !missingLog {
@@ -832,27 +855,36 @@ func (rf *Raft) LLoop() {
 Other:
         for {
             select{
+		    
+		//This server has been killed, exit
                 case <-rf.killCh: {
                      return
                 }
+		    
+		//This server has been demoted to follower state, enter follower loop and exit
                 case <-rf.DemoteCh: {
                      go rf.FLoop()
                      return
                 }
 
+		//Heartbeats are broadcast every 100 msecs. That amount of time has passed so we start another round of heartbeats
                 case <-time.After(time.Duration(100) * time.Millisecond): {
                      break Other
                 }
 
+		//We hear a reply to our heartbeat from a follower
                 case reply := <-replies: {
                 rf.mu.Lock()
 
                 leave := false
+			
+		//Check to see if we are stale. If so, convert to follower state and exit
                 if rf.checkStaleLeader("Heartbeat", reply.Term, reply.FollowerId) {
                      rf.persist()
                      go rf.FLoop()
                      leave = true
                 } else {
+		//Leader has successfully received acknowledgement of heartbeat from follower
                 }
                 rf.mu.Unlock()
 
@@ -864,6 +896,20 @@ Other:
       }
    }
 }
+
+//
+// the service using Raft (e.g. a k/v server) wants to start
+// agreement on the next command to be appended to Raft's log. if this
+// server isn't the leader, returns false. otherwise start the
+// agreement and return immediately. there is no guarantee that this
+// command will ever be committed to the Raft log, since the leader
+// may fail or lose an election.
+//
+// the first return value is the index that the command will appear at
+// if it's ever committed. the second return value is the current
+// term. the third return value is true if this server believes it is
+// the leader.
+//
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
      rf.mu.Lock()
      defer rf.mu.Unlock()
