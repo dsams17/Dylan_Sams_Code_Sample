@@ -199,14 +199,14 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply*RequestV
 //
 // Append Entries RPC sender
 //
-func (rf* Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *AppendEntriesReply) bool {
+func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *AppendEntriesReply) bool {
                      return rf.peers[server].Call("Raft.AppendEntries",
                      args, reply)
 }
 
 //InstallSnapshot RPC sender
 
-func (rf* Raft) sendInstallSnapshot(server int, args InstallSnapshotArgs,reply *InstallSnapshotReply) bool {
+func (rf *Raft) sendInstallSnapshot(server int, args InstallSnapshotArgs,reply *InstallSnapshotReply) bool {
       return rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
 }
 
