@@ -192,16 +192,14 @@ type InstallSnapshotReply struct {
 // Returns true if RPC is delivered
 //
 func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply*RequestVoteReply) bool {
-                   return rf.peers[server].Call("Raft.RequestVote", args,
-                   reply)
+                   return rf.peers[server].Call("Raft.RequestVote", args, reply)
 }
 
 //
 // Append Entries RPC sender
 //
 func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *AppendEntriesReply) bool {
-                     return rf.peers[server].Call("Raft.AppendEntries",
-                     args, reply)
+                     return rf.peers[server].Call("Raft.AppendEntries", args, reply)
 }
 
 //InstallSnapshot RPC sender
